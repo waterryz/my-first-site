@@ -1,75 +1,262 @@
-# Hunt Core System: *.ispring.ru — Findings Report
+# Hunt Core System: *.ispring.ru — Находки
 
-> Date: 2026-10-10
-> Target: `*.ispring.ru` / `*.ispringlearn.ru` / `*.ispringlearn.com`
-> API Host: `api-learn.ispringlearn.ru` (RU) / `api-learn.ispringlearn.com` (INT)
-> Method: Passive recon, OpenAPI spec analysis, public data correlation
+> Дата: 2026-10-10
+> Цель: `*.ispring.ru` / `api-learn.ispringlearn.ru`
+> Метод: Пассивный recon — OpenAPI spec, публичные сканеры, CVE базы
+> Активного тестирования НЕ проводилось
 
 ---
 
-## Exclusions
-
-The following classes are **out of scope** per engagement rules:
+## Исключения (out of scope)
 
 - Brute Force
 - Blind SSRF
-- DDoS / Rate Limiting as standalone finding
+- DDoS
 
 ---
 
-## Verdict Legend
+## Источники данных
 
-| Tag | Meaning |
-|---|---|
-| **CONFIRMED** | Verified through spec analysis or public data |
-| **LIKELY** | Strong indicators from spec + known patterns |
-| **NEEDS VALIDATION** | Requires active testing to confirm |
-| **FP** | False Positive — not a real issue |
-| **BD** | By Design — intentional vendor behavior |
-
----
-
-## Finding Index
-
-| # | Title | Severity | Verdict |
+| # | Источник | URL | Что получено |
 |---|---|---|---|
-| F-001 | IDOR via Predictable/Enumerable User IDs | HIGH | LIKELY |
-| F-002 | Mass Assignment on User Create/Update (role field) | HIGH | CONFIRMED |
-| F-003 | Missing CSP / Unsafe-Inline / Unsafe-Eval | MEDIUM | CONFIRMED |
-| F-004 | X-Frame-Options Not Set (Clickjacking) | MEDIUM | CONFIRMED |
-| F-005 | X-Content-Type-Options Missing | LOW | CONFIRMED |
-| F-006 | HSTS Without includeSubDomains | MEDIUM | CONFIRMED |
-| F-007 | HSTS Preload Not Enabled | LOW | CONFIRMED |
-| F-008 | Deprecated API Endpoints Still Active | MEDIUM | CONFIRMED |
-| F-009 | Potential XXE via XML Content-Type on REST Endpoints | MEDIUM | LIKELY |
-| F-010 | Webhook Callback URL — No Documented Validation | MEDIUM | NEEDS VALIDATION |
-| F-011 | Statistics/Grade Falsification via API | HIGH | LIKELY |
-| F-012 | Enrollment Manipulation — Arbitrary User Assignment | HIGH | LIKELY |
-| F-013 | Distinct 404 vs 403 — Object ID Enumeration | MEDIUM | CONFIRMED |
-| F-014 | No Pagination Limits on Bulk List Endpoints | MEDIUM | CONFIRMED |
-| F-015 | SOAP + REST Dual Attack Surface | MEDIUM | CONFIRMED |
-| F-016 | Infostealer Malware Indicator on Infrastructure | HIGH | CONFIRMED |
-| F-017 | DNSSEC Not Enabled | MEDIUM | CONFIRMED |
-| F-018 | Open HTTP Port on Internet-Facing Server | LOW | CONFIRMED |
-| F-019 | Password Change Without Current Password Verification | HIGH | NEEDS VALIDATION |
-| F-020 | Bulk User Termination Without Granular Authz Check | HIGH | NEEDS VALIDATION |
-| F-021 | CVE-2025-23922 — CSRF in iSpring Embedder Plugin | CRITICAL | CONFIRMED (adjacent) |
-| F-022 | Appraisal Session Permission Injection | HIGH | LIKELY |
+| S-1 | OpenAPI 3.0.0 spec | `https://api-learn.ispringlearn.ru/docs/rest-api` | Полная схема REST API: 137 endpoints, request/response schemas |
+| S-2 | UpGuard Security Report | `https://www.upguard.com/security-report/ispring-solutions` | Внешний скан заголовков, TLS, DNS, репутация |
+| S-3 | Docs iSpring (RU) | `https://docs.ispring.ru/pages/viewpage.action?pageId=18808961` | Структура API: разделы, SOAP/REST, вебхуки |
+| S-4 | NVD / CVE базы | `https://nvd.nist.gov/vuln/detail/cve-2025-23922` | CVE для iSpring Embedder |
+| S-5 | GitHub API Profile | `https://github.com/api-evangelist/ispring` | Сторонний профиль API, хосты, auth flow |
 
 ---
 
-## Detailed Findings
+## Раздел 1 — Подтверждённые находки (Confirmed)
+
+Это факты, подтверждённые внешними источниками. Не гипотезы.
 
 ---
 
-### F-001 — IDOR via Predictable/Enumerable User IDs
+### C-01. CSP: unsafe-inline без nonce + unsafe-eval
 
-**Severity:** HIGH
-**Category:** Broken Access Control (OWASP A01)
-**Verdict:** LIKELY
+**Где нашёл:** UpGuard Security Report (S-2)
+**Что именно:**
+- Content-Security-Policy содержит `unsafe-inline` без nonce/hash
+- Content-Security-Policy содержит `unsafe-eval`
 
-**Description:**
-OpenAPI spec defines `userId` as `type: string` without `format: uuid` enforcement on multiple endpoints. The spec documents no ownership or tenancy checks — only a generic `403 PermissionDenied` response. Endpoints affected:
+**Почему это проблема:** `unsafe-inline` разрешает инлайн-скрипты — XSS-пейлоад выполнится без блокировки CSP. `unsafe-eval` разрешает `eval()`, `Function()`, `setTimeout("string")`.
+
+**FP:** Нет. Внешний скан, данные публичны.
+**BD:** Вероятно частично. LMS может требовать `unsafe-inline` для рендеринга SCORM-контента. `unsafe-eval` сложнее оправдать.
+
+---
+
+### C-02. X-Frame-Options не установлен
+
+**Где нашёл:** UpGuard Security Report (S-2)
+**Что именно:** Заголовок `X-Frame-Options` не установлен в `DENY` или `SAMEORIGIN`.
+
+**Почему это проблема:** Страницы можно встроить в `<iframe>` → clickjacking на авторизованных пользователей.
+
+**FP:** Нет.
+**BD:** Возможно. iSpring может намеренно разрешать iframe-встраивание для интеграции курсов в сторонние порталы.
+
+---
+
+### C-03. X-Content-Type-Options отсутствует
+
+**Где нашёл:** UpGuard Security Report (S-2)
+**Что именно:** Заголовок `X-Content-Type-Options: nosniff` не установлен.
+
+**Почему это проблема:** Браузер может MIME-sniff ответы, интерпретируя данные как исполняемый код.
+
+**FP:** Нет.
+**BD:** Нет. Нет причин не ставить этот заголовок.
+
+---
+
+### C-04. HSTS без includeSubDomains
+
+**Где нашёл:** UpGuard Security Report (S-2)
+**Что именно:** HSTS заголовок есть, но без директивы `includeSubDomains`.
+
+**Почему это проблема:** Поддомены (`docs.ispring.ru`, `api-learn.ispringlearn.ru`, клиентские аккаунты) не защищены HSTS — могут обслуживаться по HTTP.
+
+**FP:** Нет.
+**BD:** Возможно. Если есть legacy-поддомены без HTTPS-сертификата, `includeSubDomains` сломает их.
+
+---
+
+### C-05. Нет HSTS Preload
+
+**Где нашёл:** UpGuard Security Report (S-2)
+**Что именно:** Домен не в HSTS preload list.
+
+**Почему это проблема:** Первое подключение (до кеширования HSTS) уязвимо к SSL stripping.
+
+**FP:** Нет.
+**BD:** Да. Preload — opt-in и необратимый. Многие вендоры не используют.
+
+---
+
+### C-06. DNSSEC не включён
+
+**Где нашёл:** UpGuard Security Report (S-2)
+**Что именно:** DNSSEC не настроен для домена.
+
+**Почему это проблема:** DNS-ответы можно подделать → перенаправление трафика на фишинговые сайты.
+
+**FP:** Нет.
+**BD:** Вероятно. Глобальное покрытие DNSSEC ~30%. Многие вендоры не внедряют.
+
+---
+
+### C-07. Индикатор infostealer-малвари на инфраструктуре
+
+**Где нашёл:** UpGuard Security Report (S-2)
+**Что именно:** Цитата из отчёта:
+> "Infostealer malware detected on systems associated with the organization, indicating a potential data breach."
+
+**Почему это проблема:** Если актуально — скомпрометированы учётные данные, токены, ключи API.
+
+**FP:** Возможно. UpGuard не раскрывает методологию. "Associated with the organization" может означать устройства сотрудников, а не production-серверы.
+**BD:** Нет.
+
+---
+
+### C-08. CVE-2025-23922 — CSRF в iSpring Embedder (WordPress plugin)
+
+**Где нашёл:** NVD (S-4)
+**Что именно:** WordPress-плагин "Harsh iSpring Embedder" (≤ 1.0) — CSRF, позволяющий загрузку web shell. CVSS 10.0. Патча нет.
+
+**Почему это проблема:** Полный захват WordPress-сайтов, использующих плагин для встраивания iSpring-контента.
+
+**FP:** Нет. Публичный CVE.
+**BD:** Нет.
+**Примечание:** Adjacent finding — это плагин экосистемы, не core `*.ispring.ru`.
+
+---
+
+### C-09. Deprecated API endpoints остаются активными
+
+**Где нашёл:** OpenAPI spec (S-1) — поле `deprecated: true` на endpoints
+**Что именно:** Следующие endpoints помечены deprecated, но присутствуют в текущей спеке:
+
+```
+GET  /content
+GET  /contents
+POST /contents
+GET  /content/{contentId}
+GET  /content/{contentId}/final_statuses
+GET  /courses/modules
+GET  /courses_tree
+GET  /users
+```
+
+**Почему это проблема:** Deprecated endpoints могут иметь более слабую валидацию, чем их замены. Двойная поверхность атаки.
+
+**FP:** Нет. Факт из спеки.
+**BD:** Частично. Обратная совместимость — нормально. Отсутствие hard removal date — риск.
+
+---
+
+### C-10. 404 vs 403 — различимые ошибки позволяют перечисление ID
+
+**Где нашёл:** OpenAPI spec (S-1) — секция responses на endpoints
+**Что именно:** Спека определяет разные ответы:
+- `403 PermissionDenied` — объект существует, доступа нет
+- `404 NotFound` — объект не существует
+
+Конкретные 404-сообщения из спеки: `"Unknown content item"`, `"Issued certificate not found"`, `"Session not found"`.
+
+**Почему это проблема:** Атакующий может перебирать ID и различать "существует, но нет доступа" от "не существует".
+
+**FP:** Нет. Факт из спеки.
+**BD:** Да. REST-конвенция — 404 для not found, 403 для forbidden. Возвращать 404 для обоих — hardening, который большинство API не делает.
+
+---
+
+### C-11. Нет ограничений пагинации на bulk-list endpoints
+
+**Где нашёл:** OpenAPI spec (S-1) — параметры endpoints
+**Что именно:** Следующие endpoints не имеют обязательной пагинации, все фильтры опциональны:
+
+```
+GET /enrollment
+GET /gamification/points
+GET /group
+GET /department
+GET /learning_track/courses
+GET /report/active-users-by-period
+```
+
+Массивные параметры (`contentItemIds[]`, `userIds[]`, `courseIds[]`) не имеют `maxItems`.
+
+**Почему это проблема:** Можно выгрузить весь датасет одним запросом.
+
+**FP:** Возможно. Сервер может иметь runtime-лимиты, не описанные в спеке.
+**BD:** Частично. Пагинация может существовать на уровне сервера.
+
+---
+
+### C-12. SOAP + REST — двойная поверхность атаки
+
+**Где нашёл:** Docs iSpring (S-3) — страница API overview
+**Что именно:** Одновременно активны:
+- REST API (OpenAPI 3.0.0)
+- SOAP API (WSDL 2.0 и 3.0)
+
+Оба покрывают: users, groups, departments, content, assignments, points, events.
+
+**Почему это проблема:** Патч на одном API может не быть применён на другом. Авторизационные модели могут различаться.
+
+**FP:** Нет.
+**BD:** Да. Обратная совместимость с legacy-интеграциями.
+
+---
+
+### C-13. XML accepted на REST endpoints
+
+**Где нашёл:** OpenAPI spec (S-1) — `consumes` / `requestBody.content`
+**Что именно:** Несколько REST endpoints принимают `application/xml` наряду с `application/json`:
+
+```
+POST /course/list
+POST /contents
+POST /course/tree
+POST /api/v3/token
+```
+
+**Почему это проблема:** XML-парсинг = потенциальный вектор для XXE (XML External Entity). Но это **гипотеза**, не подтверждённый эксплойт.
+
+**FP:** Возможно. Современные фреймворки отключают external entities по умолчанию.
+**BD:** Частично. Принимать XML на REST, когда основной формат JSON — расширяет поверхность без необходимости.
+
+---
+
+## Раздел 2 — Гипотезы из спеки (Needs Active Testing)
+
+Это **НЕ найденные уязвимости**. Это паттерны в OpenAPI-спецификации, которые **могут** указывать на проблемы. Без отправки запросов к API подтвердить или опровергнуть нельзя.
+
+---
+
+### H-01. Поле `role` принимается при создании/обновлении пользователя
+
+**Где увидел:** OpenAPI spec (S-1) — schema `NewUser` и `UpdateUser`
+**Что в спеке:**
+
+```
+POST /user       — body принимает: role, roleId, roles, manageableDepartmentIds, groupIds
+POST /user/{id}  — body принимает: role, roleId, roles, manageableDepartmentIds, groupIds
+```
+
+`role` enum: `learner`, `administrator`, `department_administrator`, `publisher`, `custom`, `owner`, `supervisor`, `studio_author`
+
+**Гипотеза:** Если сервер не фильтрует эти поля по роли вызывающего — можно повысить себе роль до `administrator`.
+**Что нужно проверить:** Отправить `POST /user/{myId}` с `role: "administrator"` токеном learner'а. Если 200 и роль сменилась → уязвимость. Если 403 → FP.
+
+---
+
+### H-02. userId как path parameter без проверки ownership
+
+**Где увидел:** OpenAPI spec (S-1) — path definitions
+**Что в спеке:** 7 endpoints принимают `{userId}` в пути:
 
 ```
 GET    /user/{userId}
@@ -81,597 +268,120 @@ POST   /user/{userId}/subordination
 GET    /user/{userId}/v2
 ```
 
-Similar pattern for `departmentId`, `enrollmentId`, `groupId`, `issuedCertificateId` — none have UUID format constraints in the spec.
+Спека определяет `403 PermissionDenied`, но не описывает, по какой логике сервер решает — можно или нет.
 
-**Impact:** Horizontal privilege escalation — access to any user's profile, password change, status change, deletion.
-
-**FP Assessment:** NOT FP. The absence of format constraints in the spec is a documented fact. Whether runtime authorization prevents cross-tenant access requires active testing, but the spec signals no such protection.
-
-**BD Assessment:** NOT BD. No LMS vendor intentionally allows cross-user access without authorization. The ID format choice (non-UUID strings) may be by design, but the access control gap is not.
+**Гипотеза:** Если авторизация не проверяет, что вызывающий имеет право на этот конкретный userId — IDOR.
+**Что нужно проверить:** Два пользователя, разные роли. User A запрашивает `GET /user/{userB_id}`. Если отдаёт профиль → IDOR. Если 403 → FP.
 
 ---
 
-### F-002 — Mass Assignment on User Create/Update (role field)
+### H-03. Смена пароля без текущего пароля
 
-**Severity:** HIGH
-**Category:** Mass Assignment (OWASP API3)
-**Verdict:** CONFIRMED
-
-**Description:**
-The `POST /user` (create) and `POST /user/{userId}` (update) endpoints accept the following privilege-escalation-relevant fields directly in the request body:
-
-```json
-{
-  "role": "administrator | owner | supervisor | publisher | ...",
-  "roleId": "<uuid>",
-  "roles": [{"roleId": "...", "departmentId": "..."}],
-  "manageableDepartmentIds": ["<dept-uuid>", ...],
-  "groupIds": ["<group-uuid>", ...],
-  "departmentId": "<dept-uuid>"
-}
-```
-
-The `role` field accepts `UserRoleEnum` values including: `learner`, `administrator`, `department_administrator`, `publisher`, `custom`, `owner`, `supervisor`, `studio_author`.
-
-The spec documents no server-side filtering of these fields based on the caller's role.
-
-**Impact:** A user with API access (even learner-level if token is scoped broadly) could:
-- Escalate their own role to `administrator` or `owner`
-- Assign themselves manageable departments
-- Move themselves into privileged groups
-
-**FP Assessment:** POSSIBLE FP. The server may enforce role-based field filtering at runtime even though the spec doesn't document it. Requires active testing — send `role: "administrator"` as a learner-scoped token and check if accepted.
-
-**BD Assessment:** PARTIAL BD. Accepting these fields is by design for admin callers creating users. The question is whether non-admin callers can set them. If the server silently ignores `role` from non-admin callers → BD. If it accepts → vulnerability.
-
----
-
-### F-003 — Missing CSP / Unsafe-Inline / Unsafe-Eval
-
-**Severity:** MEDIUM
-**Category:** Security Misconfiguration (OWASP A05)
-**Verdict:** CONFIRMED
-
-**Description:**
-UpGuard external scan confirms:
-- Content-Security-Policy uses `unsafe-inline` without nonce/hash
-- Content-Security-Policy contains `unsafe-eval`
-- Both directives weaken XSS protections
-
-**Source:** [UpGuard Security Report](https://www.upguard.com/security-report/ispring-solutions)
-
-**Impact:** Stored or reflected XSS payloads can execute without CSP blocking them. `unsafe-eval` permits `eval()`, `Function()`, `setTimeout("string")` execution.
-
-**FP Assessment:** NOT FP. Externally verified by third-party scanner.
-
-**BD Assessment:** LIKELY BD (partial). Many SaaS platforms use `unsafe-inline` for dynamic content rendering in LMS course players. `unsafe-eval` is harder to justify — possibly required by legacy SCORM content players that use `eval()`. The combination still degrades security posture.
-
----
-
-### F-004 — X-Frame-Options Not Set (Clickjacking)
-
-**Severity:** MEDIUM
-**Category:** Security Misconfiguration (OWASP A05)
-**Verdict:** CONFIRMED
-
-**Description:**
-`X-Frame-Options` header is not set to `DENY` or `SAMEORIGIN` on `ispring.ru` web properties.
-
-**Source:** [UpGuard Security Report](https://www.upguard.com/security-report/ispring-solutions)
-
-**Impact:** Pages can be embedded in attacker-controlled `<iframe>`, enabling clickjacking attacks on authenticated users.
-
-**FP Assessment:** NOT FP. Externally verified.
-
-**BD Assessment:** POSSIBLE BD. iSpring may intentionally allow iframe embedding for LMS content integration into third-party portals. If `frame-ancestors` in CSP covers this → BD with acceptable risk. If neither CSP `frame-ancestors` nor `X-Frame-Options` is set → vulnerability.
-
----
-
-### F-005 — X-Content-Type-Options Missing
-
-**Severity:** LOW
-**Category:** Security Misconfiguration (OWASP A05)
-**Verdict:** CONFIRMED
-
-**Description:**
-`X-Content-Type-Options: nosniff` header is not present. Browser may MIME-sniff responses.
-
-**Source:** [UpGuard Security Report](https://www.upguard.com/security-report/ispring-solutions)
-
-**Impact:** MIME confusion can lead to content being interpreted as executable. Primarily affects legacy browsers.
-
-**FP Assessment:** NOT FP. Externally verified.
-
-**BD Assessment:** NOT BD. No legitimate reason to omit this header.
-
----
-
-### F-006 — HSTS Without includeSubDomains
-
-**Severity:** MEDIUM
-**Category:** Insufficient Transport Security
-**Verdict:** CONFIRMED
-
-**Description:**
-HSTS header is present but lacks `includeSubDomains` directive. This means only the exact domain enforces HTTPS — all subdomains (`*.ispring.ru`, `*.ispringlearn.ru`) can be served over plaintext HTTP.
-
-**Source:** [UpGuard Security Report](https://www.upguard.com/security-report/ispring-solutions)
-
-**Impact:** MITM attacks on subdomains. An attacker on the same network can intercept traffic to `docs.ispring.ru`, `api-learn.ispringlearn.ru`, or customer account subdomains.
-
-**FP Assessment:** NOT FP. Externally verified.
-
-**BD Assessment:** POSSIBLE BD. Adding `includeSubDomains` requires every subdomain to support HTTPS. If any legacy subdomain lacks a certificate, the vendor may intentionally omit it. Still a risk.
-
----
-
-### F-007 — HSTS Preload Not Enabled
-
-**Severity:** LOW
-**Category:** Insufficient Transport Security
-**Verdict:** CONFIRMED
-
-**Description:**
-Domain is not on the HSTS preload list. First-time visitors (no cached HSTS policy) are vulnerable to SSL stripping on initial connection.
-
-**Source:** [UpGuard Security Report](https://www.upguard.com/security-report/ispring-solutions)
-
-**FP Assessment:** NOT FP.
-
-**BD Assessment:** LIKELY BD. Preload submission is opt-in and irreversible. Many vendors choose not to preload.
-
----
-
-### F-008 — Deprecated API Endpoints Still Active
-
-**Severity:** MEDIUM
-**Category:** Improper Asset Management (OWASP API9)
-**Verdict:** CONFIRMED
-
-**Description:**
-The OpenAPI spec marks the following endpoints as `deprecated: true` but they remain in the spec (and presumably active):
+**Где увидел:** OpenAPI spec (S-1) — schema `UpdateUserPassword`
+**Что в спеке:**
 
 ```
-GET  /content                         (replaced by: unclear)
-GET  /contents                        (replaced by: unclear)
-POST /contents                        (replaced by: unclear)
-GET  /content/{contentId}             (replaced by: unclear)
-GET  /content/{contentId}/final_statuses
-GET  /courses/modules                 (replaced by: /course/{courseId}/modules)
-GET  /courses_tree                    (replaced by: POST /course/tree)
-GET  /users                           (replaced by: GET /users/v2)
+POST /user/{userId}/password
+Body: { "password": "<new>" }
 ```
 
-**Impact:** Deprecated endpoints often have weaker validation, fewer authorization checks, and lack of security patches. Attackers can use older versions to bypass restrictions added to newer endpoints.
+Нет поля `currentPassword` или механизма re-authentication.
 
-**FP Assessment:** NOT FP. Confirmed in the published OpenAPI spec.
-
-**BD Assessment:** PARTIAL BD. Maintaining backwards compatibility is common in SaaS. However, keeping deprecated endpoints active without deprecation enforcement (e.g., sunset headers, hard removal dates) is an unnecessary risk.
+**Гипотеза:** Если неадмин может вызвать этот endpoint для чужого userId → account takeover.
+**Что нужно проверить:** Вызвать с non-admin токеном для чужого userId. Если принимает → уязвимость. Если 403 для non-admin → BD (админы легитимно сбрасывают пароли).
 
 ---
 
-### F-009 — Potential XXE via XML Content-Type on REST Endpoints
+### H-04. Массовые операции terminate/deactivate без scope
 
-**Severity:** MEDIUM
-**Category:** Injection (OWASP A03)
-**Verdict:** LIKELY
-
-**Description:**
-Multiple REST endpoints accept `application/xml` alongside `application/json`:
+**Где увидел:** OpenAPI spec (S-1) — path definitions
+**Что в спеке:**
 
 ```
-POST /course/list         (accepts XML)
-POST /contents            (accepts XML)
-POST /course/tree         (accepts XML)
-POST /api/v3/token        (accepts XML)
+POST /users/activate      — принимает массив userIds
+POST /users/deactivate    — принимает массив userIds
+POST /users/terminate     — принимает массив userIds
 ```
 
-Combined with active SOAP API (`api_2.0.wsdl`, `api_3.0.wsdl`), the XML parsing surface is significant.
+Нет документированного ограничения по department scope.
 
-Known analogous CVEs:
-- CVE-2022-40705 (Apache SOAP XXE)
-- CVE-2025-2775 (SysAid SOAP XXE)
-
-**Impact:** If external entity resolution is not disabled: local file read, SSRF (confirmed, not blind), denial of service via entity expansion.
-
-**FP Assessment:** POSSIBLE FP. Modern frameworks (Spring, .NET) disable external entities by default. Requires active testing with `<!DOCTYPE>` payloads.
-
-**BD Assessment:** NOT BD. Accepting XML on REST endpoints when JSON is the primary format serves no clear user need and widens the attack surface.
+**Гипотеза:** department_administrator может отправить userIds из чужого department.
+**Что нужно проверить:** Вызвать с dept-admin токеном, передав userId из другого department. Если выполняет → уязвимость. Если 403 → FP.
 
 ---
 
-### F-010 — Webhook Callback URL — No Documented Validation
+### H-05. Произвольные enrollments
 
-**Severity:** MEDIUM
-**Category:** Server-Side Request Forgery (OWASP A10)
-**Verdict:** NEEDS VALIDATION
-
-**Description:**
-`POST /webhook/register` accepts `callbackUrl` as a plain string with no documented format validation:
-
-```json
-{
-  "subscriberName": "attacker",
-  "callbackUrl": "https://internal-service.corp:8080/admin",
-  "secret": "optional"
-}
-```
-
-A confirmation flow exists (`/webhook/code/send` → `/webhook/confirm`), which mitigates blind SSRF. However:
-- The confirmation code delivery itself makes a server-side HTTP request to the URL
-- If the server follows HTTP redirects (see CVE-2026-48051 analogy), the initial URL check is bypassed
-
-**Note:** Blind SSRF is excluded. This finding covers only confirmed SSRF (where the attacker receives response data) via redirect chain bypass.
-
-**Impact:** Internal service discovery, potential access to cloud metadata (`169.254.169.254`), internal API access.
-
-**FP Assessment:** POSSIBLE FP. If the confirmation flow validates URL format, restricts to HTTPS, blocks private IP ranges, and does not follow redirects → FP. Requires active testing.
-
-**BD Assessment:** NOT BD. No platform intentionally allows internal network access via webhook callbacks.
-
----
-
-### F-011 — Statistics/Grade Falsification via API
-
-**Severity:** HIGH
-**Category:** Business Logic (OWASP API10)
-**Verdict:** LIKELY
-
-**Description:**
-The following endpoints allow direct modification of learning records:
+**Где увидел:** OpenAPI spec (S-1) — schema `NewEnrollment`
+**Что в спеке:**
 
 ```
-POST   /statistics/course          — Set course completion status + score (0-100) for any enrollmentId
-POST   /statistics/module          — Set module completion statuses
-DELETE /statistics/module          — Reset all module statistics
-POST   /assignments/attempts/grade — Set grades on assignment attempts
+POST /enrollment — body: { "courseIds": [...], "learnerIds": [...] }
+POST /enrollment/delete — body: { "enrollmentIds": [...] }
 ```
 
-The `UpdateCourseStatus` schema accepts:
-- `courseId`, `enrollmentIds`, `status`, `date`, `reason`, `awardedScore` (0–100)
-
-No documented check that the caller is the instructor or admin for the given course/enrollment.
-
-**Impact:** Compliance fraud — marking mandatory safety/compliance training as completed without taking it. Certification fraud. Audit trail manipulation.
-
-**FP Assessment:** POSSIBLE FP. If the server enforces that only course instructors/admins can update statistics for their courses → FP. The spec does not document this restriction.
-
-**BD Assessment:** PARTIAL BD. Admins legitimately need to adjust grades and statuses. The question is granularity — can any API token holder modify any user's records, or is it scoped? If unscoped → vulnerability. If admin-only with audit logging → BD with acceptable risk.
+**Гипотеза:** Можно записать любого пользователя на любой курс или удалить чужой enrollment.
+**Что нужно проверить:** Создать enrollment для user из чужого department. Если создаётся → уязвимость.
 
 ---
 
-### F-012 — Enrollment Manipulation — Arbitrary User Assignment
+### H-06. Фальсификация оценок и статусов
 
-**Severity:** HIGH
-**Category:** Broken Access Control (OWASP A01)
-**Verdict:** LIKELY
-
-**Description:**
-`POST /enrollment` (create enrollment) accepts:
-
-```json
-{
-  "courseIds": ["<any-course-id>"],
-  "learnerIds": ["<any-user-id>"]
-}
-```
-
-`POST /enrollment/delete` accepts:
-
-```json
-{
-  "enrollmentIds": ["<any-enrollment-id>"]
-}
-```
-
-No documented scoping to the caller's department or manageable courses.
-
-**Impact:**
-- Enroll any user in any course (including paid/restricted content)
-- Remove users from mandatory training (compliance violation)
-- Denial of service by mass-enrolling users in heavy courses
-
-**FP Assessment:** POSSIBLE FP. Server may enforce department-scoped enrollment at runtime.
-
-**BD Assessment:** PARTIAL BD. Admins need to manage enrollments. The scope of "which admins for which users/courses" is the key question.
-
----
-
-### F-013 — Distinct 404 vs 403 — Object ID Enumeration
-
-**Severity:** MEDIUM
-**Category:** Information Disclosure (OWASP A01)
-**Verdict:** CONFIRMED
-
-**Description:**
-The OpenAPI spec defines distinct error responses:
-- `403 PermissionDenied` — object exists, caller lacks access
-- `404 NotFound` — object does not exist
-
-Specific 404 messages observed: `"Unknown content item"`, `"Issued certificate not found"`, `"Session not found"`.
-
-This allows an attacker to enumerate valid IDs by distinguishing "exists but forbidden" from "does not exist".
-
-**Impact:** Pre-attack reconnaissance. Enumerate valid user IDs, content IDs, certificate IDs, then target confirmed IDs for IDOR exploitation (F-001).
-
-**FP Assessment:** NOT FP. Confirmed in the OpenAPI spec error definitions.
-
-**BD Assessment:** LIKELY BD. REST API conventions use 404 for not-found and 403 for forbidden. Returning 404 for both (to prevent enumeration) is a security hardening measure that most APIs skip. This is a defense-in-depth gap, not a design error.
-
----
-
-### F-014 — No Pagination Limits on Bulk List Endpoints
-
-**Severity:** MEDIUM
-**Category:** Unrestricted Resource Consumption (OWASP API4)
-**Verdict:** CONFIRMED
-
-**Description:**
-Multiple list endpoints have optional or no pagination, with no `maxItems` constraint on array parameters:
+**Где увидел:** OpenAPI spec (S-1) — schemas `UpdateCourseStatus`, `AssignmentAttemptGrades`
+**Что в спеке:**
 
 ```
-GET /enrollment        — all filters optional, unpaginated
-GET /gamification/points — all filters optional, unpaginated
-GET /group             — unpaginated
-GET /department        — unpaginated
-GET /learning_track/courses — unpaginated
-GET /report/active-users-by-period — unpaginated
+POST   /statistics/course  — body: courseId, enrollmentIds, status, awardedScore (0-100)
+POST   /statistics/module  — body: enrollmentIds, moduleStatuses
+DELETE /statistics/module  — сброс статистики модуля
+POST   /assignments/attempts/grade — выставление оценок
 ```
 
-Array parameters like `contentItemIds[]`, `userIds[]`, `courseIds[]` have no `maxItems`.
-
-**Impact:** Full dataset dumps in a single request. Memory exhaustion on the server (though DoS is excluded, data leakage via single-request dump is in scope).
-
-**FP Assessment:** NOT FP. Confirmed in OpenAPI spec.
-
-**BD Assessment:** PARTIAL BD. Pagination may exist at runtime even if not documented in the spec. Some vendors set server-side hard limits. Requires validation.
+**Гипотеза:** Если нет проверки, что вызывающий — инструктор/админ этого курса → можно подделать прохождение compliance-тренингов.
+**Что нужно проверить:** Обновить статус чужого enrollment токеном другого пользователя.
 
 ---
 
-### F-015 — SOAP + REST Dual Attack Surface
+### H-07. Webhook callbackUrl без валидации
 
-**Severity:** MEDIUM
-**Category:** Improper Asset Management (OWASP API9)
-**Verdict:** CONFIRMED
-
-**Description:**
-Both SOAP (WSDL 2.0 and 3.0) and REST APIs are active simultaneously, covering the same functional areas: users, groups, departments, content, assignments, points, events.
-
-**Impact:** Security patches applied to one API version may not be applied to the other. Authorization models may differ between SOAP and REST. Attackers can test both surfaces for inconsistencies.
-
-**FP Assessment:** NOT FP. Both are documented and served.
-
-**BD Assessment:** BD. Maintaining SOAP alongside REST is a common backwards-compatibility decision. The risk is accepted but real.
-
----
-
-### F-016 — Infostealer Malware Indicator on Infrastructure
-
-**Severity:** HIGH
-**Category:** Compromised Infrastructure
-**Verdict:** CONFIRMED
-
-**Description:**
-UpGuard external assessment reports:
-
-> "Infostealer malware detected on systems associated with the organization, indicating a potential data breach."
-
-**Source:** [UpGuard Security Report](https://www.upguard.com/security-report/ispring-solutions)
-
-**Impact:** If accurate: compromised credentials, session tokens, API keys, customer data. Could affect all subdomains and services.
-
-**FP Assessment:** POSSIBLE FP. UpGuard's detection methodology is not disclosed. "Associated with the organization" could mean employee devices, not production servers. Requires vendor confirmation.
-
-**BD Assessment:** NOT BD. Malware indicators are never by design.
-
----
-
-### F-017 — DNSSEC Not Enabled
-
-**Severity:** MEDIUM
-**Category:** Insufficient Transport Security
-**Verdict:** CONFIRMED
-
-**Description:**
-DNSSEC is not enabled for the `ispring.ru` domain. DNS responses can be spoofed.
-
-**Source:** [UpGuard Security Report](https://www.upguard.com/security-report/ispring-solutions)
-
-**Impact:** DNS poisoning → redirect users to phishing/malware sites, intercept API traffic.
-
-**FP Assessment:** NOT FP. Externally verified.
-
-**BD Assessment:** LIKELY BD. DNSSEC adoption is low globally (~30%). Many vendors skip it due to operational complexity. Still a risk.
-
----
-
-### F-018 — Open HTTP Port on Internet-Facing Server
-
-**Severity:** LOW
-**Category:** Security Misconfiguration (OWASP A05)
-**Verdict:** CONFIRMED
-
-**Description:**
-HTTP (port 80) is open on internet-facing server.
-
-**Source:** [UpGuard Security Report](https://www.upguard.com/security-report/ispring-solutions)
-
-**FP Assessment:** POSSIBLE FP. If HTTP→HTTPS redirect is in place (confirmed by UpGuard), the open port is for redirect only.
-
-**BD Assessment:** BD. HTTP→HTTPS redirect requires port 80 to be open. This is expected behavior. Not a vulnerability if redirect is properly configured.
-
----
-
-### F-019 — Password Change Without Current Password Verification
-
-**Severity:** HIGH
-**Category:** Broken Authentication (OWASP A07)
-**Verdict:** NEEDS VALIDATION
-
-**Description:**
-`POST /user/{userId}/password` schema requires only:
-
-```json
-{
-  "password": "<new-password>"
-}
-```
-
-No `currentPassword` or re-authentication field is present in the spec. Combined with IDOR (F-001), this could allow setting any user's password.
-
-**Impact:** Full account takeover.
-
-**FP Assessment:** POSSIBLE FP. This is an admin API, so the expectation may be that only admins call it and don't need current password verification. If the token is scoped to admin-only → FP for non-admin context, BD for admin context.
-
-**BD Assessment:** LIKELY BD for admin callers (admins legitimately reset passwords without knowing the current one). NOT BD if non-admin tokens can call this endpoint.
-
----
-
-### F-020 — Bulk User Termination Without Granular Authz Check
-
-**Severity:** HIGH
-**Category:** Broken Access Control (OWASP A01)
-**Verdict:** NEEDS VALIDATION
-
-**Description:**
-Three bulk endpoints operate on arbitrary user sets:
+**Где увидел:** OpenAPI spec (S-1) — schema `SubscriberRequest`
+**Что в спеке:**
 
 ```
-POST /users/activate      — accepts user ID array
-POST /users/deactivate    — accepts user ID array
-POST /users/terminate     — accepts user ID array
+POST /webhook/register
+Body: { "subscriberName": "...", "callbackUrl": "...", "secret": "..." }
 ```
 
-No documented restriction on which users the caller can affect. A department_administrator with a scoped token could potentially terminate users outside their department.
+`callbackUrl` — plain string, формат не указан. Есть flow подтверждения (`/webhook/code/send` → `/webhook/confirm`).
 
-**Impact:** Mass account disruption, business continuity impact, data loss (terminated users may lose access permanently).
-
-**FP Assessment:** POSSIBLE FP. Server may enforce department-level scoping at runtime.
-
-**BD Assessment:** NOT BD if scoping is absent. PARTIAL BD if properly scoped to caller's manageable scope.
+**Гипотеза:** Если сервер при подтверждении не валидирует IP (приватные диапазоны) и следует редиректам → confirmed SSRF (не blind, т.к. код подтверждения доставляется на URL).
+**Что нужно проверить:** Зарегистрировать webhook с `callbackUrl` = redirect chain → internal IP.
 
 ---
 
-### F-021 — CVE-2025-23922: CSRF in iSpring Embedder (WordPress Plugin)
+### H-08. Инъекция permissions в appraisal sessions
 
-**Severity:** CRITICAL (CVSS 10.0)
-**Category:** Cross-Site Request Forgery
-**Verdict:** CONFIRMED (adjacent product)
-
-**Description:**
-The "Harsh iSpring Embedder" WordPress plugin (≤ 1.0) has a critical CSRF vulnerability allowing web shell upload.
-
-**Source:** [NVD CVE-2025-23922](https://nvd.nist.gov/vuln/detail/cve-2025-23922)
-
-**Impact:** Complete server compromise of any WordPress site using this plugin. Not directly in iSpring LMS, but affects sites embedding iSpring content.
-
-**FP Assessment:** NOT FP. Published CVE with CVSS 10.0.
-
-**BD Assessment:** NOT BD. CSRF leading to webshell upload is never by design.
-
-**Scope Note:** This is an adjacent finding — it affects the iSpring ecosystem but not the core `*.ispring.ru` platform directly. Included for completeness.
-
----
-
-### F-022 — Appraisal Session Permission Injection
-
-**Severity:** HIGH
-**Category:** Broken Access Control (OWASP A01)
-**Verdict:** LIKELY
-
-**Description:**
-Performance Management endpoints allow modifying session permissions:
+**Где увидел:** OpenAPI spec (S-1) — performance-management endpoints
+**Что в спеке:**
 
 ```
-POST /performance-management/appraisal/session/{sessionId}/permissions/add
-POST /performance-management/appraisal/session/{sessionId}/permissions/remove
-POST /performance-management/appraisal/session/{sessionId}/employee-card/reviewer/replace
-POST /performance-management/appraisal/session/{sessionId}/employee-card/reviewer/remove
+POST /performance-management/appraisal/session/{id}/permissions/add
+POST /performance-management/appraisal/session/{id}/employee-card/reviewer/replace
 ```
 
-An attacker with API access could:
-- Add themselves as a reviewer on any 360° appraisal session
-- Remove legitimate reviewers
-- Access confidential employee performance data and reviews
-
-**Impact:** HR data breach, performance review manipulation, insider threat escalation.
-
-**FP Assessment:** POSSIBLE FP. If session ownership is enforced at runtime → FP.
-
-**BD Assessment:** NOT BD. Self-granting reviewer permissions is not a legitimate workflow.
+**Гипотеза:** Добавить себя ревьюером на чужую 360° сессию → доступ к HR-данным.
+**Что нужно проверить:** Вызвать permissions/add для чужой сессии.
 
 ---
 
-## Summary Matrix
+## Итог
 
-| # | Finding | Severity | FP? | BD? | Action |
-|---|---|---|---|---|---|
-| F-001 | IDOR User IDs | HIGH | Unlikely | No | **Test** |
-| F-002 | Mass Assignment (role) | HIGH | Possible | Partial | **Test** |
-| F-003 | Unsafe CSP | MEDIUM | No | Likely partial | **Accept / Report** |
-| F-004 | Clickjacking | MEDIUM | No | Possible | **Report** |
-| F-005 | No nosniff | LOW | No | No | **Report** |
-| F-006 | HSTS no subdomains | MEDIUM | No | Possible | **Report** |
-| F-007 | No HSTS preload | LOW | No | Likely | **Accept** |
-| F-008 | Deprecated endpoints live | MEDIUM | No | Partial | **Report** |
-| F-009 | XXE via XML endpoints | MEDIUM | Possible | No | **Test** |
-| F-010 | Webhook URL validation | MEDIUM | Possible | No | **Test** |
-| F-011 | Grade falsification | HIGH | Possible | Partial | **Test** |
-| F-012 | Enrollment manipulation | HIGH | Possible | Partial | **Test** |
-| F-013 | ID enumeration (404/403) | MEDIUM | No | Likely | **Accept / Report** |
-| F-014 | No pagination limits | MEDIUM | No | Partial | **Report** |
-| F-015 | SOAP+REST dual surface | MEDIUM | No | Yes | **Accept** |
-| F-016 | Infostealer indicator | HIGH | Possible | No | **Escalate** |
-| F-017 | No DNSSEC | MEDIUM | No | Likely | **Accept** |
-| F-018 | Open HTTP port | LOW | Possible | Yes | **Accept** |
-| F-019 | Password no re-auth | HIGH | Possible | Partial | **Test** |
-| F-020 | Bulk termination scope | HIGH | Possible | Partial | **Test** |
-| F-021 | CVE-2025-23922 CSRF | CRITICAL | No | No | **Report (adjacent)** |
-| F-022 | Appraisal permission inject | HIGH | Possible | No | **Test** |
-
----
-
-## Statistics
-
-| Category | Count |
-|---|---|
-| Total findings | 22 |
-| CRITICAL | 1 |
-| HIGH | 9 |
-| MEDIUM | 9 |
-| LOW | 3 |
-| Confirmed | 12 |
-| Likely | 5 |
-| Needs Validation | 3 |
-| Confirmed FP | 0 |
-| Confirmed BD | 2 (F-015, F-018) |
-| Partial BD | 7 |
-
----
-
-## Next Steps (Validation Priority)
-
-| Priority | Finding | Test Method |
+| Категория | Количество | Статус |
 |---|---|---|
-| 1 | F-001 (IDOR) | Create two users with different roles; attempt cross-access with each token |
-| 2 | F-002 (Mass Assignment) | Send `role: "administrator"` as learner token on `POST /user/{selfId}` |
-| 3 | F-019 (Password no re-auth) | Call `POST /user/{targetId}/password` with non-admin token |
-| 4 | F-011 (Grade falsification) | Update statistics for enrollment owned by different user |
-| 5 | F-012 (Enrollment manipulation) | Create enrollment for user in different department |
-| 6 | F-020 (Bulk termination) | Call `/users/terminate` with users outside caller's department |
-| 7 | F-009 (XXE) | Send XML payload with `<!DOCTYPE>` entity to `/course/list` |
-| 8 | F-010 (Webhook SSRF) | Register webhook with redirect chain → internal IP |
-| 9 | F-022 (Appraisal perms) | Add self as reviewer on another session |
+| **Confirmed** (внешние сканы + факты из спеки) | 13 | Не требуют active testing |
+| **Гипотезы** (паттерны из спеки) | 8 | Требуют отправки запросов к API |
+| **Итого** | **21** | |
 
----
-
-## Sources
-
-- [OpenAPI Spec — api-learn.ispringlearn.ru](https://api-learn.ispringlearn.ru/docs/rest-api)
-- [REST API Docs (RU)](https://docs.ispring.ru/pages/viewpage.action?pageId=18808964)
-- [API Overview (RU)](https://docs.ispring.ru/pages/viewpage.action?pageId=18808961)
-- [UpGuard Security Report](https://www.upguard.com/security-report/ispring-solutions)
-- [CVE-2025-23922 (NVD)](https://nvd.nist.gov/vuln/detail/cve-2025-23922)
-- [Webhook Docs](https://docs.ispringsolutions.com/ispring-learn/webhook-62863671.html)
-- [iSpring API Profile (3rd party)](https://github.com/api-evangelist/ispring)
-- [CVE-2026-48051 — SSRF via redirect (Papra, analogous)](https://www.incibe.es/en/incibe-cert/early-warning/vulnerabilities/cve-2026-48051)
+| BD (by design) | 4 | C-05, C-06, C-10, C-12 |
+| Partial BD | 5 | C-01, C-04, C-09, C-11, C-13 |
+| FP | 0 подтверждённых | Гипотезы H-01..H-08 могут оказаться FP после active testing |
